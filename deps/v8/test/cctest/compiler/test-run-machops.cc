@@ -11,6 +11,7 @@
 #include "src/base/overflowing-math.h"
 #include "src/base/safe_conversions.h"
 #include "src/base/utils/random-number-generator.h"
+#include "src/builtins/builtins.h"
 #include "src/common/ptr-compr-inl.h"
 #include "src/objects/objects-inl.h"
 #include "src/utils/boxed-float.h"
@@ -930,6 +931,76 @@ TEST(RunInt64SubWithOverflowInBranchP) {
       int32_t expected = constant;
       int64_t result;
       if (!base::bits::SignedSubOverflow64(i, j, &result)) {
+        expected = static_cast<int32_t>(result);
+      }
+      CHECK_EQ(expected, static_cast<int32_t>(bt.call(i, j)));
+    }
+  }
+}
+
+TEST(RunInt64MulWithOverflowImm) {
+  int64_t actual_val = -1, expected_val = 0;
+  FOR_INT64_INPUTS(i) {
+    {
+      RawMachineAssemblerTester<int32_t> m(MachineType::Int64());
+      Node* mul = m.Int64MulWithOverflow(m.Int64Constant(i), m.Parameter(0));
+      Node* val = m.Projection(0, mul);
+      Node* ovf = m.Projection(1, mul);
+      m.StoreToPointer(&actual_val, MachineRepresentation::kWord64, val);
+      m.Return(ovf);
+      FOR_INT64_INPUTS(j) {
+        int expected_ovf = base::bits::SignedMulOverflow64(i, j, &expected_val);
+        CHECK_EQ(expected_ovf, m.Call(j));
+        CHECK_EQ(expected_val, actual_val);
+      }
+    }
+    {
+      RawMachineAssemblerTester<int32_t> m(MachineType::Int64());
+      Node* mul = m.Int64MulWithOverflow(m.Parameter(0), m.Int64Constant(i));
+      Node* val = m.Projection(0, mul);
+      Node* ovf = m.Projection(1, mul);
+      m.StoreToPointer(&actual_val, MachineRepresentation::kWord64, val);
+      m.Return(ovf);
+      FOR_INT64_INPUTS(j) {
+        int expected_ovf = base::bits::SignedMulOverflow64(j, i, &expected_val);
+        CHECK_EQ(expected_ovf, m.Call(j));
+        CHECK_EQ(expected_val, actual_val);
+      }
+    }
+    FOR_INT64_INPUTS(j) {
+      RawMachineAssemblerTester<int32_t> m;
+      Node* mul =
+          m.Int64MulWithOverflow(m.Int64Constant(i), m.Int64Constant(j));
+      Node* val = m.Projection(0, mul);
+      Node* ovf = m.Projection(1, mul);
+      m.StoreToPointer(&actual_val, MachineRepresentation::kWord64, val);
+      m.Return(ovf);
+      int expected_ovf = base::bits::SignedMulOverflow64(i, j, &expected_val);
+      CHECK_EQ(expected_ovf, m.Call());
+      CHECK_EQ(expected_val, actual_val);
+    }
+  }
+}
+
+TEST(RunInt64MulWithOverflowInBranchP) {
+  int constant = 911999;
+  RawMachineLabel blocka, blockb;
+  RawMachineAssemblerTester<int32_t> m;
+  Int64BinopTester bt(&m);
+  Node* mul = m.Int64MulWithOverflow(bt.param0, bt.param1);
+  Node* ovf = m.Projection(1, mul);
+  m.Branch(ovf, &blocka, &blockb);
+  m.Bind(&blocka);
+  bt.AddReturn(m.Int64Constant(constant));
+  m.Bind(&blockb);
+  Node* val = m.Projection(0, mul);
+  Node* truncated = m.TruncateInt64ToInt32(val);
+  bt.AddReturn(truncated);
+  FOR_INT64_INPUTS(i) {
+    FOR_INT64_INPUTS(j) {
+      int32_t expected = constant;
+      int64_t result;
+      if (!base::bits::SignedMulOverflow64(i, j, &result)) {
         expected = static_cast<int32_t>(result);
       }
       CHECK_EQ(expected, static_cast<int32_t>(bt.call(i, j)));
@@ -6248,7 +6319,7 @@ TEST(RunFloat64Cos) {
   m.Return(m.Float64Cos(m.Parameter(0)));
   CHECK(std::isnan(m.Call(std::numeric_limits<double>::quiet_NaN())));
   CHECK(std::isnan(m.Call(std::numeric_limits<double>::signaling_NaN())));
-  FOR_FLOAT64_INPUTS(i) { CHECK_DOUBLE_EQ(base::ieee754::cos(i), m.Call(i)); }
+  FOR_FLOAT64_INPUTS(i) { CHECK_DOUBLE_EQ(COS_IMPL(i), m.Call(i)); }
 }
 
 TEST(RunFloat64Cosh) {
@@ -6358,7 +6429,7 @@ TEST(RunFloat64Sin) {
   m.Return(m.Float64Sin(m.Parameter(0)));
   CHECK(std::isnan(m.Call(std::numeric_limits<double>::quiet_NaN())));
   CHECK(std::isnan(m.Call(std::numeric_limits<double>::signaling_NaN())));
-  FOR_FLOAT64_INPUTS(i) { CHECK_DOUBLE_EQ(base::ieee754::sin(i), m.Call(i)); }
+  FOR_FLOAT64_INPUTS(i) { CHECK_DOUBLE_EQ(SIN_IMPL(i), m.Call(i)); }
 }
 
 TEST(RunFloat64Sinh) {

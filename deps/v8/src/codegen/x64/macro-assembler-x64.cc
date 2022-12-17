@@ -441,30 +441,28 @@ void TurboAssembler::LoadExternalPointerField(
     Register scratch, IsolateRootLocation isolateRootLocation) {
   DCHECK(!AreAliased(destination, scratch));
 #ifdef V8_ENABLE_SANDBOX
-  if (IsSandboxedExternalPointerType(tag)) {
-    DCHECK_NE(kExternalPointerNullTag, tag);
-    DCHECK(!IsSharedExternalPointerType(tag));
-    DCHECK(!field_operand.AddressUsesRegister(scratch));
-    if (isolateRootLocation == IsolateRootLocation::kInRootRegister) {
-      DCHECK(root_array_available_);
-      movq(scratch, Operand(kRootRegister,
-                            IsolateData::external_pointer_table_offset() +
-                                Internals::kExternalPointerTableBufferOffset));
-    } else {
-      DCHECK(isolateRootLocation == IsolateRootLocation::kInScratchRegister);
-      movq(scratch,
-           Operand(scratch, IsolateData::external_pointer_table_offset() +
-                                Internals::kExternalPointerTableBufferOffset));
-    }
+  DCHECK_NE(tag, kExternalPointerNullTag);
+  DCHECK(!IsSharedExternalPointerType(tag));
+  DCHECK(!field_operand.AddressUsesRegister(scratch));
+  if (isolateRootLocation == IsolateRootLocation::kInRootRegister) {
+    DCHECK(root_array_available_);
+    movq(scratch, Operand(kRootRegister,
+                          IsolateData::external_pointer_table_offset() +
+                              Internals::kExternalPointerTableBufferOffset));
+  } else {
+    DCHECK(isolateRootLocation == IsolateRootLocation::kInScratchRegister);
+    movq(scratch,
+         Operand(scratch, IsolateData::external_pointer_table_offset() +
+                              Internals::kExternalPointerTableBufferOffset));
+  }
     movl(destination, field_operand);
     shrq(destination, Immediate(kExternalPointerIndexShift));
     movq(destination, Operand(scratch, destination, times_8, 0));
     movq(scratch, Immediate64(~tag));
     andq(destination, scratch);
-    return;
-  }
-#endif  // V8_ENABLE_SANDBOX
+#else
   movq(destination, field_operand);
+#endif  // V8_ENABLE_SANDBOX
 }
 
 void TurboAssembler::CallEphemeronKeyBarrier(Register object,
@@ -2717,9 +2715,9 @@ void TurboAssembler::AssertZeroExtended(Register int32_register) {
   if (!v8_flags.debug_code) return;
   ASM_CODE_COMMENT(this);
   DCHECK_NE(int32_register, kScratchRegister);
-  movq(kScratchRegister, int64_t{0x0000000100000000});
-  cmpq(kScratchRegister, int32_register);
-  Check(above, AbortReason::k32BitValueInRegisterIsNotZeroExtended);
+  movl(kScratchRegister, Immediate(kMaxUInt32));  // zero-extended
+  cmpq(int32_register, kScratchRegister);
+  Check(below_equal, AbortReason::k32BitValueInRegisterIsNotZeroExtended);
 }
 
 void TurboAssembler::AssertSignedBitOfSmiIsZero(Register smi_register) {

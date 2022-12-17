@@ -441,6 +441,14 @@ RUNTIME_FUNCTION(Runtime_VerifyType) {
   return *obj;
 }
 
+RUNTIME_FUNCTION(Runtime_CheckTurboshaftTypeOf) {
+  // %CheckTurboshaftTypeOf has no effect in the interpreter.
+  HandleScope scope(isolate);
+  DCHECK_EQ(2, args.length());
+  Handle<Object> obj = args.at(0);
+  return *obj;
+}
+
 namespace {
 
 void GetOsrOffsetAndFunctionForOSR(Isolate* isolate, BytecodeOffset* osr_offset,
@@ -540,7 +548,18 @@ RUNTIME_FUNCTION(Runtime_CompileOptimizedOSRFromMaglev) {
   DCHECK_EQ(frame->LookupCodeT().kind(), CodeKind::MAGLEV);
   Handle<JSFunction> function = handle(frame->function(), isolate);
 
-  return CompileOptimizedOSR(isolate, function, osr_offset);
+  if (V8_UNLIKELY(function->ActiveTierIsTurbofan())) {
+    return function->code();
+  }
+
+  if (V8_LIKELY(isolate->concurrent_recompilation_enabled() &&
+                v8_flags.concurrent_osr && v8_flags.turbofan)) {
+    return CompileOptimizedOSR(isolate, function, osr_offset);
+  } else {
+    function->MarkForOptimization(isolate, CodeKind::TURBOFAN,
+                                  ConcurrencyMode::kSynchronous);
+    return function->code();
+  }
 }
 
 RUNTIME_FUNCTION(Runtime_LogOrTraceOptimizedOSREntry) {

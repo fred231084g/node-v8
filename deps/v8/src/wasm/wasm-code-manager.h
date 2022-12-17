@@ -148,8 +148,7 @@ struct WasmModule;
   V(WasmStringViewIterAdvance)           \
   V(WasmStringViewIterRewind)            \
   V(WasmStringViewIterSlice)             \
-  V(WasmExternInternalize)               \
-  V(WasmExternExternalize)
+  V(WasmExternInternalize)
 
 // Sorted, disjoint and non-overlapping memory regions. A region is of the
 // form [start, end). So there's no [start, end), [end, other_end),
@@ -521,20 +520,6 @@ const char* GetWasmCodeKindAsString(WasmCode::Kind);
 // Manages the code reservations and allocations of a single {NativeModule}.
 class WasmCodeAllocator {
  public:
-#if V8_TARGET_ARCH_ARM64
-  // ARM64 only supports direct calls within a 128 MB range.
-  static constexpr size_t kMaxCodeSpaceSize = 128 * MB;
-#elif V8_TARGET_ARCH_PPC64
-  // branches only takes 26 bits
-  static constexpr size_t kMaxCodeSpaceSize = 32 * MB;
-#else
-  // Use 1024 MB limit for code spaces on other platforms. This is smaller than
-  // the total allowed code space (kMaxWasmCodeMemory) to avoid unnecessarily
-  // big reservations, and to ensure that distances within a code space fit
-  // within a 32-bit signed integer.
-  static constexpr size_t kMaxCodeSpaceSize = 1024 * MB;
-#endif
-
   explicit WasmCodeAllocator(std::shared_ptr<Counters> async_counters);
   ~WasmCodeAllocator();
 
@@ -693,6 +678,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   WasmCode* GetCode(uint32_t index) const;
   bool HasCode(uint32_t index) const;
   bool HasCodeWithTier(uint32_t index, ExecutionTier tier) const;
+  void ResetCode(uint32_t index) const;
 
   void SetWasmSourceMap(std::unique_ptr<WasmModuleSourceMap> source_map);
   WasmModuleSourceMap* GetWasmSourceMap() const;
@@ -781,12 +767,6 @@ class V8_EXPORT_PRIVATE NativeModule final {
   size_t turbofan_code_size() const {
     return turbofan_code_size_.load(std::memory_order_relaxed);
   }
-  size_t baseline_compilation_cpu_duration() const {
-    return baseline_compilation_cpu_duration_.load();
-  }
-  size_t tier_up_cpu_duration() const {
-    return tier_up_cpu_duration_.load(std::memory_order_relaxed);
-  }
 
   void AddLazyCompilationTimeSample(int64_t sample);
 
@@ -819,7 +799,6 @@ class V8_EXPORT_PRIVATE NativeModule final {
   }
   void SetWireBytes(base::OwnedVector<const uint8_t> wire_bytes);
 
-  void UpdateCPUDuration(size_t cpu_duration, ExecutionTier tier);
   void AddLiftoffBailout() {
     liftoff_bailout_count_.fetch_add(1, std::memory_order_relaxed);
   }
@@ -837,32 +816,26 @@ class V8_EXPORT_PRIVATE NativeModule final {
   WasmCode::RuntimeStubId GetRuntimeStubId(Address runtime_stub_target) const;
 
   // Sample the current code size of this modules to the given counters.
-  enum CodeSamplingTime : int8_t { kAfterBaseline, kSampling };
-  void SampleCodeSize(Counters*, CodeSamplingTime) const;
+  void SampleCodeSize(Counters*) const;
 
   V8_WARN_UNUSED_RESULT std::unique_ptr<WasmCode> AddCompiledCode(
       WasmCompilationResult);
   V8_WARN_UNUSED_RESULT std::vector<std::unique_ptr<WasmCode>> AddCompiledCode(
       base::Vector<WasmCompilationResult>);
 
-  // Set a new tiering state, but don't trigger any recompilation yet; use
-  // {RecompileForTiering} for that. The two steps are split because In some
-  // scenarios we need to drop locks before triggering recompilation.
-  void SetTieringState(TieringState);
+  // Set a new debugging state, but don't trigger any recompilation;
+  // recompilation happens lazily.
+  void SetDebugState(DebugState);
 
-  // Check whether this modules is tiered down for debugging.
-  bool IsTieredDown();
+  // Check whether this modules is in debug state.
+  DebugState IsInDebugState() const {
+    base::RecursiveMutexGuard lock(&allocation_mutex_);
+    return debug_state_;
+  }
 
-  // Fully recompile this module in the tier set previously via
-  // {SetTieringState}. The calling thread contributes to compilation and only
-  // returns once recompilation is done.
-  void RecompileForTiering();
-
-  // Find all functions that need to be recompiled for a new tier. Note that
-  // compilation jobs might run concurrently, so this method only considers the
-  // compilation state of this native module at the time of the call.
-  // Returns a vector of function indexes to recompile.
-  std::vector<int> FindFunctionsToRecompile(TieringState);
+  // Remove all compiled code from the {NativeModule} and replace it with
+  // {CompileLazy} builtins.
+  void RemoveAllCompiledCode();
 
   // Free a set of functions of this module. Uncommits whole pages if possible.
   // The given vector must be ordered by the instruction start address, and all
@@ -883,7 +856,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Get or create the NamesProvider. Requires {HasWireBytes()}.
   NamesProvider* GetNamesProvider();
 
-  uint32_t* tiering_budget_array() { return tiering_budgets_.get(); }
+  uint32_t* tiering_budget_array() const { return tiering_budgets_.get(); }
 
   Counters* counters() const { return code_allocator_.counters(); }
 
@@ -940,6 +913,8 @@ class V8_EXPORT_PRIVATE NativeModule final {
   // Add code to the code cache, if it meets criteria for being cached and we do
   // not have code in the cache yet.
   void InsertToCodeCache(WasmCode* code);
+
+  bool should_update_code_table(WasmCode* new_code, WasmCode* prior_code) const;
 
   // -- Fields of {NativeModule} start here.
 
@@ -1030,7 +1005,7 @@ class V8_EXPORT_PRIVATE NativeModule final {
 
   std::unique_ptr<NamesProvider> names_provider_;
 
-  TieringState tiering_state_ = kTieredUp;
+  DebugState debug_state_ = kNotDebugging;
 
   // Cache both baseline and top-tier code if we are debugging, to speed up
   // repeated enabling/disabling of the debugger or profiler.
@@ -1046,8 +1021,6 @@ class V8_EXPORT_PRIVATE NativeModule final {
   std::atomic<size_t> liftoff_bailout_count_{0};
   std::atomic<size_t> liftoff_code_size_{0};
   std::atomic<size_t> turbofan_code_size_{0};
-  std::atomic<size_t> baseline_compilation_cpu_duration_{0};
-  std::atomic<size_t> tier_up_cpu_duration_{0};
 
   // Metrics for lazy compilation.
   std::atomic<int> num_lazy_compilations_{0};
